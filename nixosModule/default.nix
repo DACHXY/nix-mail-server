@@ -25,6 +25,11 @@ in
       default = false;
     };
 
+    hostname = mkOption {
+      type = types.str;
+      default = "mx1";
+    };
+
     caFile = mkOption {
       type = types.path;
       default = config.security.pki.caBundle;
@@ -134,9 +139,14 @@ in
       description = "Postfix relay hosts";
     };
 
-    oauth = {
+    keycloak = {
       enable = mkEnableOption "Keycloak" // {
         default = true;
+      };
+
+      hostname = mkOption {
+        type = types.str;
+        default = "keycloak";
       };
 
       dbSecretFile = mkSecretOption {
@@ -151,14 +161,57 @@ in
       };
     };
 
+    dovecot = {
+      extraConfig = mkOption {
+        type = types.lines;
+        default = "";
+        example = ''
+          userdb static {
+            fields {
+              uid = 4040
+              gid = 4040
+              home = /var/mail/vhost/%{user | domain}/%{user | username}
+            }
+          }
+        '';
+      };
+    };
+
     ldap = {
       enable = mkEnableOption "openldap" // {
         default = true;
       };
 
+      hostname = mkOption {
+        type = types.str;
+        default = "ldap";
+      };
+
+      filter = mkOption {
+        type = types.str;
+        default = "(&(objectClass=inetOrgPerson)(uid=%{user | username}))";
+        example = "(&(objectClass=unixAccount)(cn=%{user}))";
+        description = "`ldap_filter` for dovecot passdb";
+      };
+
+      extraAuthConf = mkOption {
+        type = types.lines;
+        default = "";
+        example = ''
+          auth_username_format = %{user | lower}
+          fields {
+            user = %{ldap:mail}
+            password = %{ldap:userPassword}
+          }
+        '';
+        description = "Extra configuration for dovecot passdb";
+      };
+
       secretFile = mkSecretOption {
         name = "openldapSecret";
-        description = "openldap `cn=admin,dc=<your>,dc=<domain>` password";
+        description = ''
+          openldap `cn=admin,dc=<your>,dc=<domain>` password, 
+        '';
       };
 
       webSecretFile = mkSecretOption {
@@ -175,6 +228,11 @@ in
     rspamd = {
       enable = mkEnableOption "Rspamd and trainer" // {
         default = true;
+      };
+
+      hostname = mkOption {
+        type = types.str;
+        default = "rspamd";
       };
 
       port = mkOption {

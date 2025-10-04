@@ -10,21 +10,22 @@ let
   dcList = strings.splitString "." cfg.domain;
   ldapDomain = strings.concatStringsSep "," (lists.forEach dcList (dc: "dc=" + dc));
 
-  dovecotSecretPath = "/run/dovecot-secret";
+  dovecotSecretPath = "/run/dovecot";
   authBaseConf = pkgs.writeText "dovecot-auth.conf.ext" ''
     passdb ldap {
-      auth_username_format = %{user | lower}
       ldap_bind = no
-      ldap_filter = (&(objectClass=inetOrgPerson)(uid=%{user | username}))
+      ldap_filter = ${cfg.ldap.filter} 
       use_worker = no
 
       fields {
         user = %{ldap:mail}
         password = %{ldap:userPassword}
       }
+
+      ${cfg.ldap.extraAuthConf}
     }
     ldap_auth_dn = cn=admin,${ldapDomain}
-    ldap_auth_dn_password = $LDAP_PASSWORD
+    ldap_auth_dn_password = "$LDAP_PASSWORD"
     ldap_uris = ldap://localhost
     ldap_base = ${ldapDomain}
   '';
@@ -36,16 +37,14 @@ in
   config = mkIf cfg.enable {
     security.acme.certs = mkIf cfg.configureNginx {
       "${config.services.postfix.settings.main.myhostname}" = {
-        dnsProvider = null;
-        webroot = "/var/lib/acme/acme-challenge";
+        extraDomainNames = [
+          "${cfg.domain}"
+        ];
+
         postRun = ''
           systemctl restart postfix.service
           systemctl restart dovecot.service
         '';
-      };
-      "${cfg.domain}" = {
-        dnsProvider = null;
-        webroot = "/var/lib/acme/acme-challenge";
       };
     };
 
@@ -98,14 +97,15 @@ in
             keyDir
             certDir
           ];
+
+          smtpd_tls_security_level = "encrypt";
         })
         // {
-          myhostname = "mail.${cfg.domain}";
+          myhostname = "${cfg.hostname}.${cfg.domain}";
           mynetworks = cfg.networks;
           mydestination = cfg.destination;
           myorigin = if cfg.origin == "" then cfg.domain else cfg.origin;
           relayhost = cfg.relayhosts;
-          smtpd_tls_security_level = "encrypt";
           smtpd_client_restrictions = "permit_mynetworks, permit_sasl_authenticated, reject";
           smtpd_relay_restrictions = "permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination";
           milter_macro_daemon_name = "ORIGINATING";
@@ -226,31 +226,28 @@ in
 
     # ===== Dovecot ===== #
     systemd.services.dovecot = {
+      requires = mkIf cfg.configureNginx [ "acme-finished-${dovecotDomain}.target" ];
       serviceConfig = {
-        RuntimeDirectory = [ "dovecot-secret" ];
-        RuntimeDirectoryMode = "0640";
+        RuntimeDirectory = [ "dovecot" ];
+        RuntimeDirectoryMode = "0700";
         ExecStartPre = [
           ''${pkgs.busybox.out}/bin/mkdir -p ${cfg.virtualMailDir}''
           ''${pkgs.busybox.out}/bin/chown -R vmail:vmail ${cfg.virtualMailDir}''
           ''${pkgs.busybox.out}/bin/chmod 770 ${cfg.virtualMailDir}''
-          ''${pkgs.bash}/bin/bash -c "LDAP_PASSWORD=$(cat ${cfg.ldap.secretFile}) ${pkgs.gettext.out}/bin/envsubst < ${authBaseConf} > ${authConf}"''
+          ''${pkgs.bash}/bin/bash -c "LDAP_PASSWORD=\"$(cat ${cfg.ldap.secretFile})\" ${pkgs.gettext.out}/bin/envsubst < ${authBaseConf} > ${authConf}"''
           ''${pkgs.busybox.out}/bin/chown ${config.services.dovecot.user}:${config.services.dovecot.group} ${authConf}''
           ''${pkgs.busybox.out}/bin/chmod 660 ${authConf}''
         ];
-
+        LoadCredential = mkIf cfg.configureNginx (
+          let
+            certDir = config.security.acme.certs."${dovecotDomain}".directory;
+          in
+          [
+            "cert.pem:${certDir}/cert.pem"
+            "key.pem:${certDir}/key.pem"
+          ]
+        );
       };
-    }
-    // optionalAttrs cfg.configureNginx {
-      requires = [ "acme-finished-${dovecotDomain}.target" ];
-      serviceConfig.LoadCredential = (
-        let
-          certDir = config.security.acme.certs."${dovecotDomain}".directory;
-        in
-        [
-          "cert.pem:${certDir}/cert.pem"
-          "key.pem:${certDir}/key.pem"
-        ]
-      );
     };
 
     services.dovecot =
@@ -334,6 +331,8 @@ in
           lda_mailbox_autocreate = yes
 
           !include ${authConf}
+
+          ${cfg.dovecot.extraConfig}
         '';
       };
 
@@ -419,11 +418,11 @@ in
         type = "postgresql";
         name = "keycloak";
         createLocally = true;
-        passwordFile = cfg.oauth.dbSecretFile;
+        passwordFile = cfg.keycloak.dbSecretFile;
       };
 
       settings = {
-        hostname = "keycloak.${cfg.domain}";
+        hostname = "${cfg.keycloak.hostname}.${cfg.domain}";
         proxy-headers = "xforwarded";
         http-port = 38080;
         http-enabled = true;
@@ -434,6 +433,23 @@ in
     };
 
     # ==== LDAP ===== #
+    systemd.services.openldap-pre = {
+      before = [ "openldap.service" ];
+      requiredBy = [ "openldap.service" ];
+      serviceConfig = {
+        User = "openldap";
+        ExecStart = ''${pkgs.bash}/bin/bash -c '${config.services.openldap.package}/bin/slappasswd -T ${cfg.ldap.secretFile} > /var/lib/openldap/olcPasswd' '';
+        ExecStartPost = [
+          "${pkgs.busybox.out}/bin/chmod 700 /var/lib/openldap/olcPasswd"
+        ];
+        Type = "oneshot";
+        StateDirectory = [
+          "openldap"
+        ];
+        StateDirectoryMode = "700";
+      };
+    };
+
     services.openldap = {
       enable = true;
 
@@ -463,7 +479,7 @@ in
               olcSuffix = ldapDomain;
 
               olcRootDN = "cn=admin,${ldapDomain}";
-              olcRootPW.path = cfg.ldap.secretFile;
+              olcRootPW.path = "/var/lib/openldap/olcPasswd";
 
               olcAccess = [
                 ''
@@ -532,13 +548,6 @@ in
       };
     };
 
-    systemd.services.docker-phpLDAPadmin = {
-      serviceConfig.ExecStartPre = [
-        "${pkgs.busybox.out}/bin/mkdir -p /var/lib/pla/logs"
-        "${pkgs.busybox.out}/bin/mkdir -p /var/lib/pla/sessions"
-      ];
-    };
-
     virtualisation = {
       docker = {
         enable = true;
@@ -553,12 +562,9 @@ in
           phpLDAPadmin = {
             extraOptions = [ "--network=host" ];
             image = "phpldapadmin/phpldapadmin";
-            volumes = [
-              "/var/lib/pla/logs:/app/storage/logs"
-              "/var/lib/pla/sessions:/app/storage/framework/sessions"
-            ];
             environment = {
               APP_URL = "https://ldap.${cfg.domain}";
+              APP_DEBUG = "true";
               ASSET_URL = "https://ldap.${cfg.domain}";
               APP_TIMEZONE = "Asia/Taipei";
               LDAP_HOST = "127.0.0.1";
@@ -567,6 +573,7 @@ in
               LDAP_BASE_DN = "${ldapDomain}";
               LDAP_LOGIN_ATTR = "dn";
               LDAP_LOGIN_ATTR_DESC = "Username";
+              LDAP_ALERT_ROOTDN = "true";
             };
             environmentFiles = [
               cfg.ldap.webSecretFile
@@ -599,12 +606,20 @@ in
           forceSSL = true;
           locations."/dovecot/ping".proxyPass = "http://localhost:${toString 5002}/ping";
         };
-        "ldap.${cfg.domain}" = {
+        "${cfg.ldap.hostname}.${cfg.domain}" = {
           enableACME = true;
           forceSSL = true;
-          locations."/".proxyPass = "http://localhost:${toString 8080}/";
+          locations."/" = {
+            extraConfig = ''
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_pass http://localhost:${toString 8080}/;
+            '';
+          };
         };
-        "rspamd.${cfg.domain}" = mkIf config.services.rspamd.enable {
+        "${cfg.rspamd.hostname}.${cfg.domain}" = mkIf config.services.rspamd.enable {
           enableACME = true;
           forceSSL = true;
           locations."/".proxyPass = "http://localhost:${toString cfg.rspamd.port}/";
