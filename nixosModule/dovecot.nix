@@ -151,7 +151,6 @@ let
       ${optionalString (cfg.mailUser != null) "mail_uid = ${cfg.mailUser}"}
       ${optionalString (cfg.mailGroup != null) "mail_gid = ${cfg.mailGroup}"}
 
-
       mail_driver = maildir
       mail_path = ${cfg.mailLocation}
       mail_inbox_path = ${cfg.mailLocation}/.INBOX

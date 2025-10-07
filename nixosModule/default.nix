@@ -5,6 +5,9 @@
 }:
 with lib;
 let
+  helper = import ../helper { inherit lib; };
+  inherit (helper) getOlcSuffix;
+
   mkSecretOption =
     {
       name,
@@ -15,6 +18,119 @@ let
       type = with types; path;
       description = if description == null then "Secret file for ${name}" else description;
       example = if example == null then "/run/secrets/${name}" else example;
+    };
+
+  ldapOU =
+    with types;
+    submodule {
+      options = {
+        ou = mkOption {
+          type = str;
+          example = "machine";
+          description = "Organization Unit";
+        };
+        desc = mkOption {
+          type = str;
+          default = "";
+          example = "All machine accounts";
+          description = "Description for ou.";
+        };
+        dn = mkOption {
+          type = nullOr str;
+          default = null;
+          description = ''
+            `dn` for ldap. If this is null, 
+            default value `ou=''\${ou},''\${olcSuffix}` will be set.
+          '';
+        };
+        olcSuffix = mkOption {
+          type = str;
+          default = getOlcSuffix config.mail-server.domain;
+          description = "olcSuffix for ldap.";
+          example = "dc=your,dc=domain";
+        };
+      };
+    };
+
+  ldapUser =
+    with types;
+    submodule {
+      options = {
+        uid = mkOption {
+          type = str;
+          description = "`uid` for ldap";
+          example = "user1";
+        };
+
+        ou = mkOption {
+          type = str;
+          default = "people";
+          description = "`ou` for ldap";
+          example = "group";
+        };
+
+        dn = mkOption {
+          type = nullOr str;
+          default = null;
+          description = ''
+            `dn` for ldap. If this is null, 
+            default value `uid=''\${uid},ou=''\${ou},''\${olcSuffix}` will be set.
+          '';
+        };
+
+        objectClass = mkOption {
+          type = listOf str;
+          default = [
+            "inetOrgPerson"
+            "inetMailRoutingObject"
+          ];
+          description = "`objectClass` for ldap.";
+        };
+
+        passwordFile = mkOption {
+          type = nullOr path;
+          default = null;
+          description = ''
+            `userPassword` for ldap. If this is null,
+            `userPassword` will not be set.
+          '';
+        };
+
+        mail = mkOption {
+          type = nullOr str;
+          default = null;
+          description = ''
+            Mail address for this user. If this is null,
+            `''\${uid}@''\${domain}` will be set.
+          '';
+        };
+
+        mailRoutingAddress = mkOption {
+          type = nullOr str;
+          default = null;
+          description = ''
+            mailRoutingAddress for this user. If this is null,
+            `''\${uid}@''\${domain}` will be set.
+          '';
+        };
+
+        extraAttrs = mkOption {
+          type = attrsOf str;
+          default = { };
+          description = "extra attributes for ldap.";
+          example = {
+            cn = "UserName name";
+            sn = "UserName";
+          };
+        };
+
+        olcSuffix = mkOption {
+          type = str;
+          default = getOlcSuffix config.mail-server.domain;
+          description = "olcSuffic for ldap.";
+          example = "dc=your,dc=domain";
+        };
+      };
     };
 in
 {
@@ -81,20 +197,6 @@ in
         something: root
         gender: root
       '';
-    };
-
-    mailDir = mkOption {
-      type = with types; uniq str;
-      description = "Path to store local mails";
-      default = "~/Maildir";
-      example = "~/Maildir";
-    };
-
-    virtualMailDir = mkOption {
-      type = with types; path;
-      description = "Path to store virtual mails";
-      default = "/var/mail/vhosts";
-      example = "/var/mail/vmails";
     };
 
     uid = mkOption {
@@ -180,6 +282,79 @@ in
     ldap = {
       enable = mkEnableOption "openldap" // {
         default = true;
+      };
+
+      olcAccess = mkOption {
+        type = with types; listOf lines;
+        default = [
+          ''
+            {0}to attrs=userPassword
+                by peername="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage 
+                by dn.exact="cn=admin,${getOlcSuffix config.mail-server.domain}" manage
+                by self write
+                by anonymous auth
+                by * none
+          ''
+          ''
+            {1}to *
+                by peername="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage 
+                by dn.exact="cn=admin,${getOlcSuffix config.mail-server.domain}" manage
+                by self read
+                by anonymous auth
+                by * none
+          ''
+        ];
+        description = "OlcAccess rule for ldap.";
+        example = literalExpression ''
+          [
+          ''\'''\'
+            {0}to attrs=userPassword
+                by dn.exact="cn=admin,${ldapDomain}" read
+                by dn.exact="cn=admin,${ldapDomain}" write 
+                by self write
+                by anonymous auth
+                by * none
+          ''\'''\'
+          ''\'''\'
+              {1}to *
+                  by dn.exact="cn=admin,${ldapDomain}" write
+                  by * read
+          ''\'''\'
+          ]
+        '';
+      };
+
+      ensureOUs = mkOption {
+        type = with types; listOf ldapOU;
+        default = [
+          {
+            ou = "people";
+            desc = "All user accounts";
+          }
+          {
+            ou = "groups";
+            desc = "All user groups";
+          }
+        ];
+        description = "Ensure organizationalUnit created.";
+      };
+
+      ensureUsers = mkOption {
+        type = with types; listOf ldapUser;
+        default = [
+          {
+            uid = "spam";
+            ou = "people";
+            passwordFile = "${config.mail-server.rspamd.secretFile}";
+            extraAttrs = {
+              cn = "Spam Rspamd";
+              sn = "Rspamd";
+            };
+          }
+        ];
+        description = ''
+          Ensure service accounts: `uid=$name,ou=service,<olcSuffix>`
+        '';
       };
 
       hostname = mkOption {

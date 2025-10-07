@@ -6,32 +6,46 @@
 }:
 with lib;
 let
+  helper = import ../helper { inherit lib; };
+  inherit (helper) mkLdapUser getOlcSuffix mkLdapOU;
+
   cfg = config.mail-server;
   dcList = strings.splitString "." cfg.domain;
-  ldapDomain = strings.concatStringsSep "," (lists.forEach dcList (dc: "dc=" + dc));
+  ldapDomain = getOlcSuffix cfg.domain;
 
   dovecotSecretPath = "/run/dovecot";
   authBaseConf = pkgs.writeText "dovecot-auth.conf.ext" ''
-    passdb ldap {
-      ldap_bind = no
-      ldap_filter = ${cfg.ldap.filter} 
-      use_worker = no
-
-      fields {
-        user = %{ldap:mail}
-        password = %{ldap:userPassword}
-      }
-
-      ${cfg.ldap.extraAuthConf}
-    }
     ldap_auth_dn = cn=admin,${ldapDomain}
     ldap_auth_dn_password = "$LDAP_PASSWORD"
     ldap_uris = ldap://localhost
     ldap_base = ${ldapDomain}
+
+    passdb ldap {
+      ldap_bind = no
+      ldap_filter = ${cfg.ldap.filter} 
+      use_worker = yes 
+      ${cfg.ldap.extraAuthConf}
+    }
+
+    userdb ldap {
+      use_worker = yes
+      ldap_connection_group = different-connection-group
+      filter = (mailRoutingAddress=%{user})
+      fields {
+        uid = ${toString cfg.uid}
+        gid = ${toString cfg.gid}
+        user = %{ldap:mailRoutingAddress}
+        mail_driver = maildir
+        home = /var/mail/%{user | domain}/%{user | username}
+        mail_path = /var/mail/%{user | domain}/%{user | username}/Maildir
+      }
+    }
   '';
   authConf = "${dovecotSecretPath}/dovecot-auth.conf.ext";
 
   dovecotDomain = config.services.postfix.settings.main.myhostname;
+
+  rspamdConf = "/run/rspamd/rspamd-conf";
 in
 {
   config = mkIf cfg.enable {
@@ -46,6 +60,11 @@ in
           systemctl restart dovecot.service
         '';
       };
+      "${cfg.ldap.hostname}.${cfg.domain}" = {
+        postRun = ''
+          systemctl restart openldap.service
+        '';
+      };
     };
 
     # ===== opendkim ===== #
@@ -56,10 +75,6 @@ in
     };
 
     # ===== Postfix ===== #
-    environment.sessionVariables = {
-      MAILDIR = cfg.mailDir;
-    };
-
     systemd.services.postfix = mkIf cfg.configureNginx {
       requires = [
         "acme-finished-${config.services.postfix.settings.main.myhostname}.target"
@@ -123,8 +138,7 @@ in
           smtpd_sasl_path = "private/auth";
           smtpd_sasl_auth_enable = "yes";
           tls_random_source = "dev:/dev/urandom";
-
-          home_mailbox = cfg.mailDir;
+          home_mailbox = "/var/spool/mail/%d/%n";
         }
         // optionalAttrs config.services.opendkim.enable (
           let
@@ -155,6 +169,22 @@ in
       + cfg.extraAliases;
     };
 
+    systemd.services.rspamd = {
+      path = [
+        pkgs.rspamd
+        pkgs.coreutils
+      ];
+      serviceConfig = {
+        ExecStartPre = [
+          "${pkgs.writeShellScript "generate-rspamd-passwordfile" ''
+            export LDAP_PASSWORD_HASH=$(rspamadm pw --password $(cat ${cfg.rspamd.secretFile}))
+            echo "password=$LDAP_PASSWORD_HASH" > ${rspamdConf} 
+            chmod 500 "${rspamdConf}" 
+          ''}"
+        ];
+      };
+    };
+
     services.rspamd = {
       enable = true;
       postfix.enable = true;
@@ -173,7 +203,7 @@ in
         controller = {
           includes = [
             "$CONFDIR/worker-controller.inc"
-            cfg.rspamd.secretFile
+            rspamdConf
           ];
           bindSockets = [ "127.0.0.1:${toString cfg.rspamd.port}" ];
         };
@@ -231,9 +261,6 @@ in
         RuntimeDirectory = [ "dovecot" ];
         RuntimeDirectoryMode = "0700";
         ExecStartPre = [
-          ''${pkgs.busybox.out}/bin/mkdir -p ${cfg.virtualMailDir}''
-          ''${pkgs.busybox.out}/bin/chown -R vmail:vmail ${cfg.virtualMailDir}''
-          ''${pkgs.busybox.out}/bin/chmod 770 ${cfg.virtualMailDir}''
           ''${pkgs.bash}/bin/bash -c "LDAP_PASSWORD=\"$(cat ${cfg.ldap.secretFile})\" ${pkgs.gettext.out}/bin/envsubst < ${authBaseConf} > ${authConf}"''
           ''${pkgs.busybox.out}/bin/chown ${config.services.dovecot.user}:${config.services.dovecot.group} ${authConf}''
           ''${pkgs.busybox.out}/bin/chmod 660 ${authConf}''
@@ -267,7 +294,7 @@ in
         enablePop3 = true;
         enableLmtp = true;
         enableHealthCheck = true;
-        mailLocation = lib.mkDefault "${cfg.mailDir}";
+        mailLocation = "/var/spool/mail/%{user | domain}/%{user | username}";
         mailUser = "vmail";
         mailGroup = "vmail";
 
@@ -293,7 +320,8 @@ in
         extraConfig = ''
           # authentication debug logging
           log_path = /dev/stderr
-          log_debug = (category=auth-client) OR (event=auth_client_passdb_lookup_started)
+          log_debug = (category=auth-client) OR (category=auth) OR (event=auth_client_passdb_lookup_started)
+          auth_verbose = yes
 
           auth_mechanisms = plain login
 
@@ -319,13 +347,6 @@ in
             }
           }
 
-          userdb static {
-            fields {
-              uid = ${toString cfg.uid}
-              gid = ${toString cfg.gid}
-              home = ${cfg.virtualMailDir}/%{user | domain}/%{user | username}
-            }
-          }
 
           lda_mailbox_autosubscribe = yes
           lda_mailbox_autocreate = yes
@@ -404,6 +425,7 @@ in
       110 # POP3 STARTTLS
       995 # POP3S
       389 # LDAP
+      636 # LDAPS
     ];
 
     services.postgresql = {
@@ -433,7 +455,7 @@ in
     };
 
     # ==== LDAP ===== #
-    systemd.services.openldap-pre = {
+    systemd.services.openldap-pre = mkIf config.services.openldap.enable {
       before = [ "openldap.service" ];
       requiredBy = [ "openldap.service" ];
       serviceConfig = {
@@ -450,93 +472,178 @@ in
       };
     };
 
-    services.openldap = {
-      enable = true;
+    systemd.services.openldap-ensure-service-users = mkIf config.services.openldap.enable (
+      let
+        firstDC = elemAt dcList 0;
+        baseLdif = pkgs.writeText "openldap-base.ldif" ''
+          dn: ${ldapDomain} 
+          objectClass: dcObject
+          objectClass: organization
+          dc: ${firstDC} 
+          o: ${firstDC} Organization
 
-      urlList = [ "ldap:///" ];
-      settings = {
-        attrs = {
-          olcLogLevel = "conns config";
+          ${concatStringsSep "\n" (map (u: mkLdapOU u) cfg.ldap.ensureOUs)}
+
+          ${concatStringsSep "\n" (map (u: mkLdapUser u) cfg.ldap.ensureUsers)}
+        '';
+      in
+      {
+        after = [ "openldap.service" ];
+        wantedBy = [ "openldap.service" ];
+        path = [
+          config.services.openldap.package
+          pkgs.gawk
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${pkgs.writeShellScript "ldap-ensure-services-users" ''
+            URI="ldap://localhost:389"
+            BIND_DN="cn=admin,${ldapDomain}"
+            PASSWORD="$(cat ${cfg.ldap.secretFile})"
+            LDIF="${baseLdif}"
+
+            grep "^dn" "$LDIF" | cut -d' ' -f2- | while read -r DN; do
+              echo "Checking: $DN"
+              if ldapsearch -x -D "$BIND_DN" -w "$PASSWORD" -b "$DN" "(objectClass=*)" >/dev/null; then
+                echo "$DN Exist, skip."
+              else
+                echo "$DN Not exist, creating..."
+                awk -v dn="$DN" '
+                  BEGIN {found=0}
+                  /^dn:[[:space:]]*/ {
+                      if(found) exit
+                      if($0 ~ "^dn:[[:space:]]*"dn) {found=1; print; next}
+                  }
+                  found && !/^$/ {print}
+                  found && /^$/ {exit}
+                ' "$LDIF" | \
+                while IFS= read -r line; do
+                  if [[ $line =~ ^userPassword:[[:space:]]*/ ]]; then
+                    secret_file="$(echo "$line" | sed 's/^userPassword:[[:space:]]*//; s/[[:space:]]*$//')"
+                    if [[ -f "$secret_file" ]]; then
+                      echo "userPassword: $(slappasswd -h "{SSHA}" -s "$(cat "$secret_file")" 2>/dev/null)"
+                    else
+                      echo "$line"
+                    fi
+                  else
+                    echo "$line"
+                  fi
+                done | ldapadd -x -D "$BIND_DN" -w "$PASSWORD"
+              fi
+            done
+          ''}";
         };
+      }
+    );
 
-        children = {
-          "cn=schema".includes = [
-            "${pkgs.openldap}/etc/schema/core.ldif"
-            "${pkgs.openldap}/etc/schema/cosine.ldif"
-            "${pkgs.openldap}/etc/schema/inetorgperson.ldif"
-          ];
+    systemd.services.openldap = {
+      requires = [ "acme-finished-${cfg.ldap.hostname}.${cfg.domain}.target" ];
+      serviceConfig.LoadCredential =
+        let
+          certDir = config.security.acme.certs."${cfg.ldap.hostname}.${cfg.domain}".directory;
+        in
+        [
+          "full.pem:${certDir}/full.pem"
+          "cert.pem:${certDir}/cert.pem"
+          "key.pem:${certDir}/key.pem"
+        ];
+    };
 
-          "olcDatabase={1}mdb" = {
-            attrs = {
-              objectClass = [
-                "olcDatabaseConfig"
-                "olcMdbConfig"
-              ];
+    services.openldap =
+      let
+        credsDir = "/run/credentials/openldap.service";
+        caDir = "${credsDir}/full.pem";
+        certDir = "${credsDir}/cert.pem";
+        keyDir = "${credsDir}/key.pem";
+      in
+      {
+        enable = true;
 
-              olcDatabase = "{1}mdb";
-              olcDbDirectory = "/var/lib/openldap/data";
+        urlList = (
+          [
+            "ldap:///"
+            "ldapi:///"
+          ]
+          ++ (optionals cfg.configureNginx [ "ldaps:///" ])
+        );
+        settings = {
+          attrs = {
+            olcLogLevel = "conns config";
 
-              olcSuffix = ldapDomain;
+            olcTLSCACertificateFile = caDir;
+            olcTLSCertificateFile = certDir;
+            olcTLSCertificateKeyFile = keyDir;
+            olcTLSCipherSuite = "HIGH:MEDIUM:+3DES:+RC4:+aNULL";
+            olcTLSCRLCheck = "none";
+            olcTLSVerifyClient = "never";
+            olcTLSProtocolMin = "3.1";
+          };
 
-              olcRootDN = "cn=admin,${ldapDomain}";
-              olcRootPW.path = "/var/lib/openldap/olcPasswd";
+          children = {
+            "cn=schema".includes = [
+              "${pkgs.openldap}/etc/schema/core.ldif"
+              "${pkgs.openldap}/etc/schema/cosine.ldif"
+              "${pkgs.openldap}/etc/schema/inetorgperson.ldif"
+              "${../schema/inetMailRoutingObject.ldif}"
+            ];
 
-              olcAccess = [
-                ''
-                  {0}to attrs=userPassword
-                      by dn.exact="cn=admin,${ldapDomain}" read
-                      by dn.exact="cn=admin,${ldapDomain}" write 
-                      by self write
-                      by anonymous auth
-                      by * none
-                ''
-                ''
-                  {1}to *
-                      by dn.exact="cn=admin,${ldapDomain}" write
-                      by * read
-                ''
-              ];
-            };
-
-            children = {
-              "olcOverlay={2}ppolicy".attrs = {
+            "olcDatabase={1}mdb" = {
+              attrs = {
                 objectClass = [
-                  "olcOverlayConfig"
-                  "olcPPolicyConfig"
-                  "top"
+                  "olcDatabaseConfig"
+                  "olcMdbConfig"
                 ];
-                olcOverlay = "{2}ppolicy";
-                olcPPolicyHashCleartext = "TRUE";
+
+                olcDatabase = "{1}mdb";
+                olcDbDirectory = "/var/lib/openldap/data";
+
+                olcSuffix = ldapDomain;
+
+                olcRootDN = "cn=admin,${ldapDomain}";
+                olcRootPW.path = "/var/lib/openldap/olcPasswd";
+
+                olcAccess = cfg.ldap.olcAccess;
               };
 
-              "olcOverlay={3}memberof".attrs = {
-                objectClass = [
-                  "olcOverlayConfig"
-                  "olcMemberOf"
-                  "top"
-                ];
-                olcOverlay = "{3}memberof";
-                olcMemberOfRefInt = "TRUE";
-                olcMemberOfDangling = "ignore";
-                olcMemberOfGroupOC = "groupOfNames";
-                olcMemberOfMemberAD = "member";
-                olcMemberOfMemberOfAD = "memberOf";
-              };
+              children = {
+                "olcOverlay={2}ppolicy".attrs = {
+                  objectClass = [
+                    "olcOverlayConfig"
+                    "olcPPolicyConfig"
+                    "top"
+                  ];
+                  olcOverlay = "{2}ppolicy";
+                  olcPPolicyHashCleartext = "TRUE";
+                };
 
-              "olcOverlay={4}refint".attrs = {
-                objectClass = [
-                  "olcOverlayConfig"
-                  "olcRefintConfig"
-                  "top"
-                ];
-                olcOverlay = "{4}refint";
-                olcRefintAttribute = "memberof member manager owner";
+                "olcOverlay={3}memberof".attrs = {
+                  objectClass = [
+                    "olcOverlayConfig"
+                    "olcMemberOf"
+                    "top"
+                  ];
+                  olcOverlay = "{3}memberof";
+                  olcMemberOfRefInt = "TRUE";
+                  olcMemberOfDangling = "ignore";
+                  olcMemberOfGroupOC = "groupOfNames";
+                  olcMemberOfMemberAD = "member";
+                  olcMemberOfMemberOfAD = "memberOf";
+                };
+
+                "olcOverlay={4}refint".attrs = {
+                  objectClass = [
+                    "olcOverlayConfig"
+                    "olcRefintConfig"
+                    "top"
+                  ];
+                  olcOverlay = "{4}refint";
+                  olcRefintAttribute = "memberof member manager owner";
+                };
               };
             };
           };
         };
       };
-    };
 
     # ==== postsrsd ==== #
     services.postsrsd = {
