@@ -161,13 +161,17 @@ in
         This option results in following configuration:
 
         networking.firewall.allowedTCPPorts = [
-          25  # SMTP
+          80 # HTTP
+          443 # HTTPS
+          25 # SMTP
           465 # SMTPS
-          587 # STARTTLS
+          587 # SMTP STARTTLS
           143 # IMAP STARTTLS
           993 # IMAPS
           110 # POP3 STARTTLS
           995 # POP3S
+          389 # LDAP
+          636 # LDAPS
         ];
       '';
     };
@@ -213,8 +217,14 @@ in
 
     domain = mkOption {
       type = with types; uniq str;
-      default = config.networking.fqdn;
+      default = config.networking.domain;
       description = "Domain name used for mail server";
+    };
+
+    extraDomains = mkOption {
+      type = with types; listOf str;
+      default = [ ];
+      description = "Extra domain names used for mail server";
     };
 
     origin = mkOption {
@@ -239,6 +249,12 @@ in
       type = with types; listOf str;
       default = [ ];
       description = "Postfix relay hosts";
+    };
+
+    relayDomains = mkOption {
+      type = with types; listOf str;
+      default = [ ];
+      description = "Postfix relay domains";
     };
 
     keycloak = {

@@ -30,7 +30,7 @@ let
     userdb ldap {
       use_worker = yes
       ldap_connection_group = different-connection-group
-      filter = (mailRoutingAddress=%{user})
+      filter = (|(mailRoutingAddress=%{user})(mail=%{user}))
       fields {
         uid = ${toString cfg.uid}
         gid = ${toString cfg.gid}
@@ -53,7 +53,8 @@ in
       "${config.services.postfix.settings.main.myhostname}" = {
         extraDomainNames = [
           "${cfg.domain}"
-        ];
+        ]
+        ++ cfg.extraDomains;
 
         postRun = ''
           systemctl restart postfix.service
@@ -70,8 +71,11 @@ in
     # ===== opendkim ===== #
     services.opendkim = {
       enable = true;
+      settings = {
+        UMask = "0007";
+      };
       domains = "csl:${cfg.domain}";
-      selector = "mail";
+      selector = "${cfg.hostname}";
     };
 
     # ===== Postfix ===== #
@@ -93,7 +97,30 @@ in
     services.postfix = {
       enable = true;
       virtual = cfg.virtual;
-      enableSubmissions = true;
+      enableSubmission = true; # 587
+      enableSubmissions = true; # 465
+      enableSmtp = true;
+
+      submissionsOptions = {
+        milter_macro_daemon_name = "ORIGINATING";
+        smtpd_client_restrictions = "permit_sasl_authenticated,reject";
+        smtpd_sasl_auth_enable = "yes";
+        smtpd_sasl_type = "dovecot";
+        smtpd_sasl_path = "private/auth";
+        smtpd_tls_protocols = "TLSv1.3";
+        smtpd_tls_mandatory_protocols = "TLSv1.3";
+      };
+
+      submissionOptions = {
+        milter_macro_daemon_name = "ORIGINATING";
+        smtpd_client_restrictions = "permit_sasl_authenticated,reject";
+        smtpd_sasl_auth_enable = "yes";
+        smtpd_sasl_type = "dovecot";
+        smtpd_sasl_path = "private/auth";
+        smtpd_tls_security_level = "encrypt";
+        smtpd_tls_protocols = "TLSv1.3";
+        smtpd_tls_mandatory_protocols = "TLSv1.3";
+      };
 
       settings.main =
         let
@@ -112,8 +139,6 @@ in
             keyDir
             certDir
           ];
-
-          smtpd_tls_security_level = "encrypt";
         })
         // {
           myhostname = "${cfg.hostname}.${cfg.domain}";
@@ -121,9 +146,9 @@ in
           mydestination = cfg.destination;
           myorigin = if cfg.origin == "" then cfg.domain else cfg.origin;
           relayhost = cfg.relayhosts;
+          relay_domains = cfg.relayDomains;
           smtpd_client_restrictions = "permit_mynetworks, permit_sasl_authenticated, reject";
-          smtpd_relay_restrictions = "permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination";
-          milter_macro_daemon_name = "ORIGINATING";
+          smtpd_relay_restrictions = "permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination, reject";
 
           virtual_uid_maps = [
             "static:${toString cfg.uid}"
@@ -134,9 +159,6 @@ in
 
           virtual_mailbox_domains = [ cfg.domain ];
           virtual_transport = "lmtp:unix:private/dovecot-lmtp";
-          smtpd_sasl_type = "dovecot";
-          smtpd_sasl_path = "private/auth";
-          smtpd_sasl_auth_enable = "yes";
           tls_random_source = "dev:/dev/urandom";
           home_mailbox = "/var/spool/mail/%d/%n";
         }
@@ -188,6 +210,15 @@ in
     services.rspamd = {
       enable = true;
       postfix.enable = true;
+      locals = {
+        "redis.conf".text = ''
+          servers = "${config.services.redis.servers.rspamd.unixSocket}";
+        '';
+        "classifier-bayes.conf".text = ''
+          backend = "redis";
+          autolearn = true;
+        '';
+      };
       workers = {
         normal = {
           includes = [ "$CONFDIR/worker-normal.inc" ];
@@ -208,13 +239,24 @@ in
           bindSockets = [ "127.0.0.1:${toString cfg.rspamd.port}" ];
         };
       };
+      overrides."whitelist.conf".text = ''
+        whiltelist_from {
+          ${cfg.domain} = true;
+        }
+      '';
+    };
+
+    services.redis.servers.rspamd = {
+      enable = true;
+      port = 0;
+      user = config.services.rspamd.user;
     };
 
     # ===== rspamd trainer ===== #
     services.rspamd-trainer = {
       enable = true;
       settings = {
-        HOST = dovecotDomain;
+        HOST = cfg.domain;
         USERNAME = "spam@${cfg.domain}";
         INBOXPREFIX = "INBOX.";
       };
@@ -419,7 +461,7 @@ in
       443 # HTTPS
       25 # SMTP
       465 # SMTPS
-      587 # STARTTLS
+      587 # SMTP STARTTLS
       143 # IMAP STARTTLS
       993 # IMAPS
       110 # POP3 STARTTLS
@@ -698,6 +740,10 @@ in
     users.users.vmail = {
       uid = cfg.uid;
       group = "vmail";
+    };
+
+    users.groups."${config.services.opendkim.group}" = {
+      members = [ config.services.postfix.user ];
     };
 
     services.nginx = mkIf cfg.configureNginx {
