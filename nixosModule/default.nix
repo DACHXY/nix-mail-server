@@ -1,13 +1,13 @@
 {
   config,
   lib,
+  options,
   ...
 }:
 with lib;
 let
   helper = import ../helper { inherit lib; };
   inherit (helper) getOlcSuffix;
-
   mkSecretOption =
     {
       name,
@@ -154,6 +154,20 @@ in
       '';
     };
 
+    webmail = {
+      enable = (mkEnableOption "Enable RoundCube webmail") // {
+        default = false;
+      };
+      hostname = mkOption {
+        type = types.str;
+        default = "${config.mail-server.hostname}.${config.mail-server.domain}";
+        description = ''
+          Hostname for webmail.
+        '';
+        example = "mail.your.domain";
+      };
+    };
+
     openFirewall = mkOption {
       type = types.bool;
       default = false;
@@ -277,9 +291,49 @@ in
         default = "keycloak";
         description = "Keycloak username";
       };
+
+      adminAccountFile = options.services.keycloak.adminAccountFile;
+
+      ensureClients = mkOption {
+        type = options.services.keycloak.ensureClients.type;
+        default = {
+          dovecot = {
+            clientSecret = {
+              owner = "dovecot";
+              group = "dovecot";
+            };
+          };
+          roundcube = {
+            clientSecret = {
+              owner = "roundcube";
+              group = "roundcube";
+            };
+            rootUrl = "https://${config.services.roundcube.hostName}";
+            baseUrl = "https://${config.services.roundcube.hostName}";
+            redirectUris = [ "/*" ];
+          };
+        };
+        description = options.services.keycloak.ensureClients.description;
+      };
+
+      extraConf = mkOption {
+        type = with types; attrs;
+        default = { };
+        example = literalExpression ''
+          {
+            initialAdminPassword = "temp-secret-password";
+          }
+        '';
+        description = "Extra keycloak settings";
+      };
     };
 
     dovecot = {
+      oauth = {
+        enable = (mkEnableOption ''Enable OAuth2 authentication for dovecot.'') // {
+          default = false;
+        };
+      };
       extraConfig = mkOption {
         type = types.lines;
         default = "";
@@ -462,6 +516,7 @@ in
 
   imports = [
     ./dovecot.nix
+    ./keycloak.nix
     ./server.nix
   ];
 }
