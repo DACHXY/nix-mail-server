@@ -1,13 +1,13 @@
 {
   config,
   lib,
+  options,
   ...
 }:
 with lib;
 let
   helper = import ../helper { inherit lib; };
   inherit (helper) getOlcSuffix;
-
   mkSecretOption =
     {
       name,
@@ -154,6 +154,20 @@ in
       '';
     };
 
+    webmail = {
+      enable = (mkEnableOption "Enable RoundCube webmail") // {
+        default = false;
+      };
+      hostname = mkOption {
+        type = types.str;
+        default = "${config.mail-server.hostname}.${config.mail-server.domain}";
+        description = ''
+          Hostname for webmail.
+        '';
+        example = "mail.your.domain";
+      };
+    };
+
     openFirewall = mkOption {
       type = types.bool;
       default = false;
@@ -277,9 +291,49 @@ in
         default = "keycloak";
         description = "Keycloak username";
       };
+
+      adminAccountFile = options.services.keycloak.adminAccountFile;
+
+      ensureClients = mkOption {
+        type = options.services.keycloak.ensureClients.type;
+        default = {
+          dovecot = {
+            clientSecret = {
+              owner = "dovecot";
+              group = "dovecot";
+            };
+          };
+          roundcube = {
+            clientSecret = {
+              owner = "roundcube";
+              group = "roundcube";
+            };
+            rootUrl = "https://${config.services.roundcube.hostName}";
+            baseUrl = "https://${config.services.roundcube.hostName}";
+            redirectUris = [ "/*" ];
+          };
+        };
+        description = options.services.keycloak.ensureClients.description;
+      };
+
+      extraConf = mkOption {
+        type = with types; attrs;
+        default = { };
+        example = literalExpression ''
+          {
+            initialAdminPassword = "temp-secret-password";
+          }
+        '';
+        description = "Extra keycloak settings";
+      };
     };
 
     dovecot = {
+      oauth = {
+        enable = (mkEnableOption ''Enable OAuth2 authentication for dovecot.'') // {
+          default = false;
+        };
+      };
       extraConfig = mkOption {
         type = types.lines;
         default = "";
@@ -407,7 +461,7 @@ in
 
       webSecretFile = mkSecretOption {
         name = "phpLdapAdminSecret";
-        description = ''Value from `php -r 'echo "APP_KEY=base64:".base64_encode(random_bytes(32))."\n";'`'';
+        description = ''Value from `nix shell nixpkgs#php -c php -r "echo 'base64:'.base64_encode(random_bytes(32)).\"\n\";"`'';
         example = literalExpression ''
           pkgs.writeText "phpLdapAdminSecret" ''\'''\'
             APP_KEY=base64:HVQLeatagcQizES7SzEx7hDioAJpB0AX1Pfg032eatE=
@@ -434,10 +488,10 @@ in
 
       secretFile = mkSecretOption {
         name = "rspamdSecret";
-        description = "Generate with `rspamadm pw`";
+        description = "Password for rspamd";
         example = literalExpression ''
           pkgs.writeText "rspamdSecret" ''\'''\'
-            password=$2$tbazk58jkj8qi16s6fkji9xg8nizrpp5$zkpneyqy5fzrjrxo45ia1n8r9z56hsqb4r73iko9p8j3a1am1okb
+            Secret-Password
           ''\'''\'
         '';
       };
@@ -462,6 +516,7 @@ in
 
   imports = [
     ./dovecot.nix
+    ./keycloak.nix
     ./server.nix
   ];
 }

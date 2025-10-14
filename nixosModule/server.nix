@@ -11,10 +11,16 @@ let
 
   cfg = config.mail-server;
   dcList = strings.splitString "." cfg.domain;
+  oauthURI =
+    if cfg.configureNginx then
+      "https://${cfg.keycloak.hostname}.${cfg.domain}"
+    else
+      "http://localhost:${toString config.services.keycloak.settings.http-port}";
   ldapDomain = getOlcSuffix cfg.domain;
 
   dovecotSecretPath = "/run/dovecot";
-  authBaseConf = pkgs.writeText "dovecot-auth.conf.ext" ''
+  ldapAuthConf = "${dovecotSecretPath}/dovecot-auth-ldap.conf.ext";
+  ldapAuthBaseConf = pkgs.writeText "dovecot-ldap.conf.ext" ''
     ldap_auth_dn = cn=admin,${ldapDomain}
     ldap_auth_dn_password = "$LDAP_PASSWORD"
     ldap_uris = ldap://localhost
@@ -41,11 +47,26 @@ let
       }
     }
   '';
-  authConf = "${dovecotSecretPath}/dovecot-auth.conf.ext";
+
+  oauth2AuthConf = "${dovecotSecretPath}/dovecot-auth-oauth2.conf.ext";
+  oauth2AuthBaseConf = pkgs.writeText "dovecot-oauth.conf.ext" ''
+    oauth2 {
+      openid_configuration_url = ${oauthURI}/realms/master/.well-known/openid-configuration
+      introspection_url = ${oauthURI}/realms/master/protocol/openid-connect/userinfo
+      introspection_mode = auth
+      send_auth_headers = yes
+      username_attribute = email
+      client_id = ${config.services.keycloak.ensureClients.dovecot.clientId}
+      client_secret = $CLIENT_SECRET 
+    }
+
+    passdb oauth2 {
+    }
+  '';
 
   dovecotDomain = config.services.postfix.settings.main.myhostname;
 
-  rspamdConf = "/run/rspamd/rspamd-conf";
+  rspamdSecretPath = "/run/rspamd/rspamd-controller-password.inc";
 in
 {
   config = mkIf cfg.enable {
@@ -191,7 +212,7 @@ in
       + cfg.extraAliases;
     };
 
-    systemd.services.rspamd = {
+    systemd.services.rspamd = mkIf config.services.rspamd.enable {
       path = [
         pkgs.rspamd
         pkgs.coreutils
@@ -199,9 +220,9 @@ in
       serviceConfig = {
         ExecStartPre = [
           "${pkgs.writeShellScript "generate-rspamd-passwordfile" ''
-            export LDAP_PASSWORD_HASH=$(rspamadm pw --password $(cat ${cfg.rspamd.secretFile}))
-            echo "password=$LDAP_PASSWORD_HASH" > ${rspamdConf} 
-            chmod 500 "${rspamdConf}" 
+            RSPAMD_PASSWORD_HASH=$(rspamadm pw --password $(cat ${cfg.rspamd.secretFile}))
+            echo "enable_password = \"$RSPAMD_PASSWORD_HASH\";" > ${rspamdSecretPath} 
+            chmod 770 "${rspamdSecretPath}" 
           ''}"
         ];
       };
@@ -221,6 +242,7 @@ in
       };
       workers = {
         normal = {
+          type = "normal";
           includes = [ "$CONFDIR/worker-normal.inc" ];
           bindSockets = [
             {
@@ -232,10 +254,13 @@ in
           ];
         };
         controller = {
+          type = "controller";
           includes = [
             "$CONFDIR/worker-controller.inc"
-            rspamdConf
           ];
+          extraConfig = ''
+            .include(try=true; priority=1,duplicate=merge) "${rspamdSecretPath}"
+          '';
           bindSockets = [ "127.0.0.1:${toString cfg.rspamd.port}" ];
         };
       };
@@ -298,15 +323,24 @@ in
 
     # ===== Dovecot ===== #
     systemd.services.dovecot = {
-      requires = mkIf cfg.configureNginx [ "acme-finished-${dovecotDomain}.target" ];
+      requires =
+        (if cfg.configureNginx then [ "acme-finished-${dovecotDomain}.target" ] else [ ])
+        ++ (if cfg.dovecot.oauth.enable then [ "keycloak-ensure-clients.service" ] else [ ]);
+      after = mkIf cfg.webmail.enable [ "keycloak-ensure-clients.service" ];
       serviceConfig = {
         RuntimeDirectory = [ "dovecot" ];
         RuntimeDirectoryMode = "0700";
-        ExecStartPre = [
-          ''${pkgs.bash}/bin/bash -c "LDAP_PASSWORD=\"$(cat ${cfg.ldap.secretFile})\" ${pkgs.gettext.out}/bin/envsubst < ${authBaseConf} > ${authConf}"''
-          ''${pkgs.busybox.out}/bin/chown ${config.services.dovecot.user}:${config.services.dovecot.group} ${authConf}''
-          ''${pkgs.busybox.out}/bin/chmod 660 ${authConf}''
-        ];
+        ExecStartPre =
+          (optional cfg.dovecot.oauth.enable [
+            ''${pkgs.bash}/bin/bash -c "CLIENT_SECRET=\"$(cat /run/credentials/dovecot.service/clientSecret)\" ${pkgs.gettext.out}/bin/envsubst < ${oauth2AuthBaseConf} > ${oauth2AuthConf}"''
+            ''${pkgs.busybox.out}/bin/chown ${config.services.dovecot.user}:${config.services.dovecot.group} ${oauth2AuthConf}''
+            ''${pkgs.busybox.out}/bin/chmod 660 ${oauth2AuthConf}''
+          ])
+          ++ [
+            ''${pkgs.bash}/bin/bash -c "LDAP_PASSWORD=\"$(cat ${cfg.ldap.secretFile})\" ${pkgs.gettext.out}/bin/envsubst < ${ldapAuthBaseConf} > ${ldapAuthConf}"''
+            ''${pkgs.busybox.out}/bin/chown ${config.services.dovecot.user}:${config.services.dovecot.group} ${ldapAuthConf}''
+            ''${pkgs.busybox.out}/bin/chmod 660 ${ldapAuthConf}''
+          ];
         LoadCredential = mkIf cfg.configureNginx (
           let
             certDir = config.security.acme.certs."${dovecotDomain}".directory;
@@ -314,6 +348,7 @@ in
           [
             "cert.pem:${certDir}/cert.pem"
             "key.pem:${certDir}/key.pem"
+            "clientSecret:${config.services.keycloak.ensureClients.dovecot.clientSecret.path}"
           ]
         );
       };
@@ -365,7 +400,7 @@ in
           log_debug = (category=auth-client) OR (category=auth) OR (event=auth_client_passdb_lookup_started)
           auth_verbose = yes
 
-          auth_mechanisms = plain login
+          auth_mechanisms = plain login ${optionalString cfg.dovecot.oauth.enable "oauthbearer xoauth2"}
 
           ${optionalString cfg.configureNginx ''
             ssl = required
@@ -393,7 +428,8 @@ in
           lda_mailbox_autosubscribe = yes
           lda_mailbox_autocreate = yes
 
-          !include ${authConf}
+          !include ${ldapAuthConf}
+          ${optionalString cfg.dovecot.oauth.enable "!include ${oauth2AuthConf}"}
 
           ${cfg.dovecot.extraConfig}
         '';
@@ -475,24 +511,44 @@ in
     };
 
     # ===== OAuth keycloak ===== #
-    services.keycloak = {
-      enable = true;
+    systemd.services.keycloak = {
+      after = [ "openldap.service" ];
+      requires = [ "openldap.service" ];
+    };
 
-      database = {
-        type = "postgresql";
-        name = "keycloak";
-        createLocally = true;
-        passwordFile = cfg.keycloak.dbSecretFile;
-      };
+    services.keycloak = (
+      {
+        inherit (cfg.keycloak) adminAccountFile ensureClients;
+        enable = true;
 
-      settings = {
-        hostname = "${cfg.keycloak.hostname}.${cfg.domain}";
-        proxy-headers = "xforwarded";
-        http-port = 38080;
-        http-enabled = true;
-        health-enabled = true;
-        http-management-port = 38081;
-        truststore-paths = cfg.caFile;
+        database = {
+          type = "postgresql";
+          name = "keycloak";
+          createLocally = true;
+          passwordFile = cfg.keycloak.dbSecretFile;
+        };
+
+        settings = {
+          hostname = "${cfg.keycloak.hostname}.${cfg.domain}";
+          proxy-headers = "xforwarded";
+          http-port = 38080;
+          http-enabled = true;
+          health-enabled = true;
+          http-management-port = 38081;
+          truststore-paths = cfg.caFile;
+        };
+      }
+      // cfg.keycloak.extraConf
+    );
+
+    systemd.services.keycloak-ensure-clients-post = mkIf cfg.webmail.enable {
+      wantedBy = [ "keycloak-ensure-clients.service" ];
+      after = [ "keycloak-ensure-clients.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.writeShellScript "keycloak-ensure-clients-post" ''
+          ${optionalString cfg.webmail.enable "${pkgs.systemd}/bin/systemctl restart phpfpm-roundcube.service"}
+        ''}";
       };
     };
 
@@ -579,7 +635,7 @@ in
     );
 
     systemd.services.openldap = {
-      requires = [ "acme-finished-${cfg.ldap.hostname}.${cfg.domain}.target" ];
+      wants = [ "acme-finished-${cfg.ldap.hostname}.${cfg.domain}.target" ];
       serviceConfig.LoadCredential =
         let
           certDir = config.security.acme.certs."${cfg.ldap.hostname}.${cfg.domain}".directory;
@@ -744,6 +800,50 @@ in
 
     users.groups."${config.services.opendkim.group}" = {
       members = [ config.services.postfix.user ];
+    };
+
+    systemd.services.phpfpm-roundcube = {
+      after = [ "keycloak-ensure-clients.service" ];
+      requires = [ "keycloak-ensure-clients.service" ];
+      serviceConfig = {
+        RuntimeDirectory = [ "roundcube" ];
+        RuntimeMode = "0600";
+        ExecStartPre = [
+          ''${pkgs.bash}/bin/bash -c "cat ${config.services.keycloak.ensureClients.roundcube.clientSecret.path} > /run/roundcube/clientSecret"''
+          ''${pkgs.coreutils}/bin/chown roundcube:roundcube /run/roundcube/clientSecret''
+          ''${pkgs.coreutils}/bin/chmod 600 /run/roundcube/clientSecret''
+        ];
+      };
+    };
+
+    services.roundcube = mkIf cfg.webmail.enable {
+      enable = true;
+      configureNginx = cfg.configureNginx;
+      hostName = "${cfg.webmail.hostname}";
+      extraConfig =
+        let
+          enableTLS = cfg.configureNginx;
+          prefix = if enableTLS then "tls://" else "";
+        in
+        ''
+          $config['oauth_client_id'] = '${config.services.keycloak.ensureClients.roundcube.clientId}';
+          $config['oauth_client_secret'] = trim(file_get_contents('/run/roundcube/clientSecret'));
+          $config['oauth_provider'] = 'generic';
+          $config['oauth_provider_name'] = 'Keycloak';
+          $config['oauth_auth_uri'] = '${oauthURI}/realms/master/protocol/openid-connect/auth';
+          $config['oauth_token_uri'] = '${oauthURI}/realms/master/protocol/openid-connect/token';
+          $config['oauth_identity_uri'] = '${oauthURI}/realms/master/protocol/openid-connect/userinfo';
+          $config['oauth_scope'] = 'openid email';
+          $config['oauth_debug'] = true;
+          $config['oauuth_identity_fields'] = ['email'];
+          $config['oauth_login_redirect'] = true;
+
+          $config['imap_host'] = '${prefix}${cfg.hostname}.${cfg.domain}';
+          $config['smtp_server'] = '${prefix}${cfg.hostname}.${cfg.domain}';
+          $config['username_domain'] = [
+            '${cfg.hostname}.${cfg.domain}' => '${cfg.domain}'
+          ];
+        '';
     };
 
     services.nginx = mkIf cfg.configureNginx {

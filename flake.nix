@@ -10,7 +10,7 @@
       self,
       nixpkgs,
       ...
-    }:
+    }@inputs:
     {
       nixosModules = rec {
         mail-server = import ./nixosModule;

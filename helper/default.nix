@@ -9,8 +9,37 @@ let
     removePrefix
     ;
   inherit (builtins) attrValues mapAttrs;
+
   olcSuffix2Domain =
     suffix: concatStringsSep "." (map (x: removePrefix "dc=" x) (splitString "," suffix));
+
+  defaultClientSettings = {
+    serviceAccountsEnabled = true;
+    authorizationServicesEnabled = true;
+    fullScopeAllowed = true;
+    frontchannelLogout = true;
+    defaultClientScopes = [
+      "service_account"
+      "web-origins"
+      "acr"
+      "profile"
+      "roles"
+      "basic"
+      "email"
+    ];
+    optionalClientScopes = [
+      "address"
+      "phone"
+      "offline_access"
+      "organization"
+      "microprofile-jwt"
+    ];
+    access = {
+      view = true;
+      configure = true;
+      manage = true;
+    };
+  };
 in
 {
   mkLdapUser =
@@ -52,4 +81,6 @@ in
     '';
 
   getOlcSuffix = domain: concatStringsSep "," (map (dc: "dc=${dc}") (splitString "." domain));
+
+  mkOAuthClient = authConf: authConf // defaultClientSettings;
 }

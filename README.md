@@ -2,21 +2,33 @@
 
 This is a mail server module for NixOS with flake support.
 
+## Features
+
+- [x] Keycloak (OAuth)
+- [x] Dovecot (OAuth & LDAP) + Postfix
+- [x] Rspamd
+- [x] Postsrsd
+- [x] Roundcube (Webmail with OAuth)
+- [x] ACME Support
+- [x] OAuth (openid connection) automatically configure clients
+
+> Sadly, you still need to configure `LDAP User Federation` manually.
+
 ## Installation
 
 Install
 
 ```nix
 # flake.nix
-
+{
 inputs = {
     mail-server = {
         url = "github:dachxy/nix-mail-server";
     };
-}
+};
 
 outputs = { self, mail-server, ...}@inputs: {
-    ...
+    # other configurations ...
     nixosConfigurations."<your-device>" = nixpkgs.lib.nixosSystem {
         modules = [
             mail-server.nixosModules.default
@@ -25,59 +37,89 @@ outputs = { self, mail-server, ...}@inputs: {
             }
         ];
     };
+};
 }
 ```
 
 Example
 
 ```nix
+let
+    # You can change this to your unix username,
+    username = "admin"; 
+    domain = "your.domain";
+in
+{
   mail-server = {
     enable = true;
     configureNginx = true;
     hostname = "mx1";
-    domain = "your.domain";
+    domain = domain;
+    extraDomains = [
+        "mail.${domain}"
+    ];
     rootAlias = "${username}";
     relayhosts = [ "[mx1.some.host]:587" ];
     networks = [
-      "127.0.0.0/8"
-      "10.0.0.0/24"
+        "127.0.0.0/8"
+        "10.0.0.0/24"
     ];
     virtual = ''
-      admin@your.domain ${username}@your.domain
-      postmaster@your.domain ${username}@your.domain
+        admin@${domain} ${username}@${domain}
+        postmaster@${domain} ${username}@${domain}
     '';
     openFirewall = true;
     keycloak = {
-      dbSecretFile = "${pkgs.writeText "test" ''123''}";
+        dbSecretFile = "${pkgs.writeText "test" ''123''}";
+
+        # ==== Option 1 ===== #
+        # Leave `adminAccountFile` empty to use default temp admin account
+        # to initialize clients configuration. Instead, requires `initialAdminPassword`.
+        extraConf = {
+            initialAdminPassword = "temp-secret";
+        };
+
+        # ==== Option 2 ===== #
+        # Usually when temp admin is deleted, 
+        # use a env file to supply new realm manager credentials.
+        adminAccountFile = "${pkgs.writeText "test" ''
+            ADMIN_USERNAME=admin
+            ADMIN_PASSWORD=passwd
+        ''}";
     };
     ldap = {
-      filter = "(cn=%{user | username})";
-      extraAuthConf = ''
-        auth_username_format = %{user | lower}
-        fields {
-          user = %{ldap:mail}
-          password = %{ldap:userPassword}
-        }
-      '';
-      # keep this screts in production
-      secretFile = "${pkgs.writeText "olcRootPW" "YourPassword"}";
-      # keep this screts in production
-      webSecretFile = "${pkgs.writeText "test" ''
-        APP_KEY=base64:HVQLeatagcQizES7SzEx7hDioAJpB0AX1Pfg032eatE=
-      ''}";
+        filter = "(&(objectClass=inetOrgPerson)(objectClass=mailRoutingObject)(uid=%{user | username}))";
+        extraAuthConf = ''
+            auth_username_format = %{user | lower}
+            fields {
+                user = %{ldap:mail}
+                password = %{ldap:userPassword}
+            }
+        '';
+
+        # keep this screts in production
+        secretFile = "${pkgs.writeText "olcRootPW" "YourPassword"}";
+
+        # keep this screts in production
+        # Generate with `nix shell nixpkgs#php -c php -r "echo 'base64:'.base64_encode(random_bytes(32)).\"\n\";"`
+        webSecretFile = "${pkgs.writeText "test" ''
+            APP_KEY=base64:HVQLeatagcQizES7SzEx7hDioAJpB0AX1Pfg032eatE=
+        ''}";
     };
     rspamd = {
-      # keep this screts in production
-      secretFile = "${pkgs.writeText "test" ''
-        test123
-      ''}";
+        # keep this screts in production
+        secretFile = "${pkgs.writeText "test" ''
+            test123
+        ''}";
 
-      # keep this screts in production
-      trainerSecretFile = "${pkgs.writeText "test" ''
-        PASSWORD=123
-      ''}";
+        # keep this screts in production
+        trainerSecretFile = "${pkgs.writeText "test" ''
+            PASSWORD=123
+        ''}";
     };
+    dovecot.oauth.enable = true;
   };
+};
 ```
 
 ## Initial Configuration
@@ -124,10 +166,16 @@ You can use the following configuration to ensure users and OUs.
 mail-server.ldap.ensureUsers = [
   {
     uid = "example";
-    ou = "people"; # defualt: people
-    dn = null; # default (if null): uid=${uid},ou=${ou},${olcSuffix}
-    mail = "example@<your-domain>"; # default (if null): ${uid}@${domain}
-    objectClass = ["inetOrgPerson" "inetMailRoutingObject"]; # default ["inetOrgPerson" "inetMailRoutingObject"]
+    # defualt: people
+    ou = "people"; 
+    # default (if null): uid=${uid},ou=${ou},${olcSuffix}
+    dn = null; 
+    # default (if null): ${uid}@${domain}
+    mail = "example@<your-domain>"; 
+
+    # default ["inetOrgPerson" "inetMailRoutingObject"]
+    objectClass = ["inetOrgPerson" "inetMailRoutingObject"]; 
+
     # The password will be hashed to meet ppolicy.
     passwordFile = "${pkgs.writeText "testpassword" ''
       test123
@@ -150,4 +198,68 @@ mail-server.ldap.ensureOUs= [
     desc = "New OU for something";
   }
 ];
+```
+
+### WebMail (Roundcube) && OAuth
+
+Require enabling oauth for dovecot:
+
+```nix
+{
+    webmail = {
+      enable = true;
+      hostname = "mail.${domain}";
+    };
+
+    # Enable oauth for dovecot also
+    dovecot.oauth = {
+        enable = true;
+    };
+}
+```
+
+Keycloak settings:
+
+```nix
+{
+    keycloak = {
+        dbSecretFile = "${pkgs.writeText "test" ''123''}";
+
+        # ==== Option 1 ===== #
+        # Leave `adminAccountFile` empty to use default temp admin account
+        # to initialize clients configuration. Instead, requires `initialAdminPassword`.
+        extraConf = {
+            initialAdminPassword = "temp-secret";
+        };
+
+        # ==== Option 2 ===== #
+        # Usually when temp admin is deleted, 
+        # use a env file to supply new realm manager credentials.
+        adminAccountFile = "${pkgs.writeText "test" ''
+            ADMIN_USERNAME=admin
+            ADMIN_PASSWORD=passwd
+        ''}";
+
+        # This is the defalut settings for clients.
+        # client will be automatically created through keycloak restful api.
+        # client secret will be automatically set for dovecot and roundcube, too.
+        ensureClients = {
+          dovecot = {
+            clientSecret = {
+              owner = "dovecot";
+              group = "dovecot";
+            };
+          };
+          roundcube = {
+            clientSecret = {
+              owner = "roundcube";
+              group = "roundcube";
+            };
+            rootUrl = "https://${config.services.roundcube.hostName}";
+            baseUrl = "https://${config.services.roundcube.hostName}";
+            redirectUris = [ "/*" ];
+          };
+      };
+    };
+}
 ```
