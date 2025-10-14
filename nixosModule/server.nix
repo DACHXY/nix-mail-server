@@ -66,7 +66,7 @@ let
 
   dovecotDomain = config.services.postfix.settings.main.myhostname;
 
-  rspamdConf = "/run/rspamd/rspamd-conf";
+  rspamdSecretPath = "/run/rspamd/rspamd-controller-password.inc";
 in
 {
   config = mkIf cfg.enable {
@@ -212,7 +212,7 @@ in
       + cfg.extraAliases;
     };
 
-    systemd.services.rspamd = {
+    systemd.services.rspamd = mkIf config.services.rspamd.enable {
       path = [
         pkgs.rspamd
         pkgs.coreutils
@@ -220,9 +220,9 @@ in
       serviceConfig = {
         ExecStartPre = [
           "${pkgs.writeShellScript "generate-rspamd-passwordfile" ''
-            export LDAP_PASSWORD_HASH=$(rspamadm pw --password $(cat ${cfg.rspamd.secretFile}))
-            echo "password=$LDAP_PASSWORD_HASH" > ${rspamdConf} 
-            chmod 500 "${rspamdConf}" 
+            RSPAMD_PASSWORD_HASH=$(rspamadm pw --password $(cat ${cfg.rspamd.secretFile}))
+            echo "enable_password = \"$RSPAMD_PASSWORD_HASH\";" > ${rspamdSecretPath} 
+            chmod 770 "${rspamdSecretPath}" 
           ''}"
         ];
       };
@@ -242,6 +242,7 @@ in
       };
       workers = {
         normal = {
+          type = "normal";
           includes = [ "$CONFDIR/worker-normal.inc" ];
           bindSockets = [
             {
@@ -253,10 +254,13 @@ in
           ];
         };
         controller = {
+          type = "controller";
           includes = [
             "$CONFDIR/worker-controller.inc"
-            rspamdConf
           ];
+          extraConfig = ''
+            .include(try=true; priority=1,duplicate=merge) "${rspamdSecretPath}"
+          '';
           bindSockets = [ "127.0.0.1:${toString cfg.rspamd.port}" ];
         };
       };

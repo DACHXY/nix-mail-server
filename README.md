@@ -101,7 +101,7 @@ in
         secretFile = "${pkgs.writeText "olcRootPW" "YourPassword"}";
 
         # keep this screts in production
-        # Generate with `rspamadm pw`
+        # Generate with `nix shell nixpkgs#php -c php -r "echo 'base64:'.base64_encode(random_bytes(32)).\"\n\";"`
         webSecretFile = "${pkgs.writeText "test" ''
             APP_KEY=base64:HVQLeatagcQizES7SzEx7hDioAJpB0AX1Pfg032eatE=
         ''}";

@@ -461,7 +461,7 @@ in
 
       webSecretFile = mkSecretOption {
         name = "phpLdapAdminSecret";
-        description = ''Value from `php -r 'echo "APP_KEY=base64:".base64_encode(random_bytes(32))."\n";'`'';
+        description = ''Value from `nix shell nixpkgs#php -c php -r "echo 'base64:'.base64_encode(random_bytes(32)).\"\n\";"`'';
         example = literalExpression ''
           pkgs.writeText "phpLdapAdminSecret" ''\'''\'
             APP_KEY=base64:HVQLeatagcQizES7SzEx7hDioAJpB0AX1Pfg032eatE=
@@ -488,10 +488,10 @@ in
 
       secretFile = mkSecretOption {
         name = "rspamdSecret";
-        description = "Generate with `rspamadm pw`";
+        description = "Password for rspamd";
         example = literalExpression ''
           pkgs.writeText "rspamdSecret" ''\'''\'
-            password=$2$tbazk58jkj8qi16s6fkji9xg8nizrpp5$zkpneyqy5fzrjrxo45ia1n8r9z56hsqb4r73iko9p8j3a1am1okb
+            Secret-Password
           ''\'''\'
         '';
       };
