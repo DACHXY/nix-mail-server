@@ -101,7 +101,7 @@ in
 
     # ===== Postfix ===== #
     systemd.services.postfix = mkIf cfg.configureNginx {
-      requires = [
+      wants = [
         "acme-finished-${config.services.postfix.settings.main.myhostname}.target"
       ];
       serviceConfig.LoadCredential =
@@ -323,9 +323,8 @@ in
 
     # ===== Dovecot ===== #
     systemd.services.dovecot = {
-      requires =
-        (if cfg.configureNginx then [ "acme-finished-${dovecotDomain}.target" ] else [ ])
-        ++ (if cfg.dovecot.oauth.enable then [ "keycloak-ensure-clients.service" ] else [ ]);
+      wants = if cfg.configureNginx then [ "acme-finished-${dovecotDomain}.target" ] else [ ];
+      requires = if cfg.dovecot.oauth.enable then [ "keycloak-ensure-clients.service" ] else [ ];
       after = mkIf cfg.webmail.enable [ "keycloak-ensure-clients.service" ];
       serviceConfig = {
         RuntimeDirectory = [ "dovecot" ];
@@ -807,7 +806,6 @@ in
       requires = [ "keycloak-ensure-clients.service" ];
       serviceConfig = {
         RuntimeDirectory = [ "roundcube" ];
-        RuntimeMode = "0600";
         ExecStartPre = [
           ''${pkgs.bash}/bin/bash -c "cat ${config.services.keycloak.ensureClients.roundcube.clientSecret.path} > /run/roundcube/clientSecret"''
           ''${pkgs.coreutils}/bin/chown roundcube:roundcube /run/roundcube/clientSecret''
