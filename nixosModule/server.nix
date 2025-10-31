@@ -239,6 +239,16 @@ in
           backend = "redis";
           autolearn = true;
         '';
+        "dkim_signing.conf".text = ''
+          enabled = false;
+        '';
+        "milter_headers.conf".text = ''
+          enabled = true;
+          extended_spam_headers = true;
+          skip_local = false;
+          use = ["x-spamd-bar", "x-spam-level", "x-spam-status", "authentication-results", "x-spamd-result"];
+          authenticated_headers = ["authentication-results"];
+        '';
       };
       workers = {
         normal = {
