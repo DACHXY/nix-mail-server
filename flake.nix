@@ -11,6 +11,9 @@
       nixpkgs,
       ...
     }@inputs:
+    let
+      system = "x86_64-linux";
+    in
     {
       nixosModules = rec {
         mail-server = import ./nixosModule;
@@ -18,5 +21,14 @@
       };
 
       overlay = import ./overlays;
+
+      packages.${system}.dovecot =
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ self.overlay ];
+          };
+        in
+        pkgs.dovecot;
     };
 }

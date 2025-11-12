@@ -9,7 +9,15 @@
 
     # Dovecot 2.4 Not need this patch anymore
     patches = builtins.filter (
-      patch: (!(prev.lib.hasInfix "Support-openssl-3.0.patch" (toString patch)))
+      patch:
+      let
+        inherit (prev.lib) hasInfix any;
+        patchName = toString patch;
+      in
+      !(any (keyword: hasInfix keyword patchName) [
+        "Support-openssl-3.0.patch"
+        "test-data-stack"
+      ])
     ) oldAttrs.patches;
 
     # Dovecot 2.4 Not need this patch anymore
