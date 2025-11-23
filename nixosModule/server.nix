@@ -744,7 +744,12 @@ in
                     "top"
                   ];
                   olcOverlay = "{4}refint";
-                  olcRefintAttribute = "memberof member manager owner";
+                  olcRefintAttribute = [
+                    "memberof"
+                    "member"
+                    "manager"
+                    "owner"
+                  ];
                 };
               };
             };
