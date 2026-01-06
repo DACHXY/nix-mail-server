@@ -10,12 +10,13 @@ let
   inherit (helper) mkLdapUser getOlcSuffix mkLdapOU;
 
   cfg = config.mail-server;
+  keycloakCfg = config.services.keycloak;
   dcList = strings.splitString "." cfg.domain;
   oauthURI =
     if cfg.configureNginx then
-      "https://${cfg.keycloak.hostname}.${cfg.domain}"
+      "https://${keycloakCfg.settings.hostname}"
     else
-      "http://localhost:${toString config.services.keycloak.settings.http-port}";
+      "http://127.0.0.1:${toString config.services.keycloak.settings.http-port}";
   ldapDomain = getOlcSuffix cfg.domain;
 
   dovecotSecretPath = "/run/dovecot";
@@ -513,6 +514,9 @@ in
       995 # POP3S
       389 # LDAP
       636 # LDAPS
+      keycloakCfg.settings.http-port
+      keycloakCfg.settings.http-management-port
+      cfg.rspamd.port
     ];
 
     services.postgresql = {
@@ -604,7 +608,7 @@ in
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${pkgs.writeShellScript "ldap-ensure-services-users" ''
-            URI="ldap://localhost:389"
+            URI="ldap://127.0.0.1:389"
             BIND_DN="cn=admin,${ldapDomain}"
             PASSWORD="$(cat ${cfg.ldap.secretFile})"
             LDIF="${baseLdif}"
@@ -780,15 +784,12 @@ in
         containers = {
           phpLDAPadmin = {
             extraOptions = [ "--network=host" ];
-            image = "phpldapadmin/phpldapadmin";
+            image = "phpldapadmin/phpldapadmin:latest";
             environment = {
-              APP_URL = "https://ldap.${cfg.domain}";
               APP_DEBUG = "true";
-              ASSET_URL = "https://ldap.${cfg.domain}";
               APP_TIMEZONE = "Asia/Taipei";
               LDAP_HOST = "127.0.0.1";
-              SERVER_NAME = ":8080";
-              LDAP_LOGIN_OBJECTCLASS = "inetOrgPerson";
+              LDAP_PORT = "389";
               LDAP_BASE_DN = "${ldapDomain}";
               LDAP_LOGIN_ATTR = "dn";
               LDAP_LOGIN_ATTR_DESC = "Username";
@@ -870,33 +871,27 @@ in
         "${config.services.postfix.settings.main.myhostname}" = {
           enableACME = true;
           forceSSL = true;
-          locations."/dovecot/ping".proxyPass = "http://localhost:${toString 5002}/ping";
+          locations."/dovecot/ping".proxyPass = "http://127.0.0.1:${toString 5002}/ping";
         };
         "${cfg.ldap.hostname}.${cfg.domain}" = {
           enableACME = true;
           forceSSL = true;
           locations."/" = {
-            extraConfig = ''
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_pass http://localhost:${toString 8080}/;
-            '';
+            proxyPass = "http://127.0.0.1:${toString 8080}";
           };
         };
         "${cfg.rspamd.hostname}.${cfg.domain}" = mkIf config.services.rspamd.enable {
           enableACME = true;
           forceSSL = true;
-          locations."/".proxyPass = "http://localhost:${toString cfg.rspamd.port}/";
+          locations."/".proxyPass = "http://127.0.0.1:${toString cfg.rspamd.port}/";
         };
         "${config.services.keycloak.settings.hostname}" = mkIf config.services.keycloak.enable {
           enableACME = true;
           forceSSL = true;
           locations."/".proxyPass =
-            "http://localhost:${toString config.services.keycloak.settings.http-port}";
+            "http://127.0.0.1:${toString config.services.keycloak.settings.http-port}";
           locations."/health".proxyPass =
-            "http://localhost:${toString config.services.keycloak.settings.http-management-port}/health";
+            "http://127.0.0.1:${toString config.services.keycloak.settings.http-management-port}/health";
         };
       };
     };
