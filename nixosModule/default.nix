@@ -1,3 +1,4 @@
+{ self, system }:
 {
   config,
   lib,
@@ -330,7 +331,7 @@ in
 
     dovecot = {
       oauth = {
-        enable = (mkEnableOption ''Enable OAuth2 authentication for dovecot.'') // {
+        enable = (mkEnableOption "Enable OAuth2 authentication for dovecot.") // {
           default = false;
         };
       };
@@ -515,7 +516,7 @@ in
   };
 
   imports = [
-    ./dovecot.nix
+    (import ./dovecot.nix { inherit self system; })
     ./keycloak.nix
     ./server.nix
   ];

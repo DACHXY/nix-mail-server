@@ -1,3 +1,4 @@
+{ self, system }:
 {
   config,
   lib,
@@ -28,10 +29,11 @@ let
     listToAttrs
     filter
     ;
+
   inherit (lib.strings) match hasPrefix;
 
   cfg = config.services.dovecot;
-  dovecotPkg = pkgs.dovecot;
+  dovecotPkg = self.packages.${system}.dovecot;
 
   pversion = dovecotPkg.version;
   isVersion24 = hasPrefix "2.4" pversion;

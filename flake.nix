@@ -16,7 +16,7 @@
     in
     {
       nixosModules = rec {
-        mail-server = import ./nixosModule;
+        mail-server = import ./nixosModule { inherit self system; };
         default = mail-server;
       };
 
