@@ -142,7 +142,6 @@ let
           ssl_server_cert_file = ${cfg.sslServerCert}
           ssl_server_key_file = ${cfg.sslServerKey}
           ${optionalString (cfg.sslCACert != null) ("ssl_server_ca_file = " + cfg.sslCACert)}
-          ${optionalString cfg.enableDHE "ssl_server_dh_file = ${config.security.dhparams.params.dovecot.path}"}
           auth_allow_cleartext = no
         ''
     )
