@@ -670,11 +670,6 @@ in
   config = mkIf cfg.enable {
     security.pam.services.dovecot = mkIf cfg.enablePAM { };
 
-    security.dhparams = mkIf (cfg.sslServerCert != null && cfg.enableDHE) {
-      enable = true;
-      params.dovecot = { };
-    };
-
     services.dovecot = {
       protocols =
         optional cfg.enableImap "imap" ++ optional cfg.enablePop3 "pop3" ++ optional cfg.enableLmtp "lmtp";
